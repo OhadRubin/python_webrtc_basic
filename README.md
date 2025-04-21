@@ -1,6 +1,6 @@
 # WebRTC Signaling Server and Client
 
-This project implements a WebRTC signaling server and client for establishing peer-to-peer connections between browsers or other WebRTC-compatible applications.
+This project implements a WebRTC signaling server and client for establishing peer-to-peer connections.
 
 ## Features
 
