@@ -53,7 +53,7 @@ We will break down the implementation of the WebRTC signaling server and client 
 
 ---
 
-**Stage 2: Server-Side Pairing Logic and Client Pairing Request**
+**Stage 2: Server-Side Pairing Logic and Client Pairing Request** (DONE!)
 
 *   **Goal:** Implement the server logic to handle pairing requests between two clients. Clients should be able to request pairing and receive confirmation or errors.
 *   **Server Implementation (`server.py`):**

@@ -6,6 +6,7 @@ import uuid
 import websockets
 from websockets.exceptions import ConnectionClosedOK, ConnectionClosedError
 import time # For potential future use (e.g., last seen time)
+from typing import Dict, Any
 
 # --- Configuration ---
 SERVER_HOST = "localhost"
@@ -20,11 +21,11 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- Server State ---
-clients = {}  # Dictionary to store client_id: websocket_connection
+clients: Dict[str, Dict[str, Any]] = {}  # Dictionary to store client_id: {ws, peer_id, ...}
 # Example structure for clients:
 # clients = { "client_id_1": {"ws": websocket_object, "peer_id": "client_id_2", "last_pong": time.time()}, ... }
 
-pairings = {} # Dictionary to store client_id -> peer_id mapping for quick lookup
+pairings: Dict[str, str] = {} # Dictionary to store client_id -> peer_id mapping for quick lookup
 # --- Helper Functions ---
 async def send_json(ws, data):
     """Sends JSON data over a WebSocket connection."""
@@ -140,6 +141,30 @@ async def handle_message(client_id, target_id, content):
     
     logger.debug(f"Message forwarded from {client_id} to {target_id}")
 
+async def relay_signaling_message(sender_id: str, message_data: dict):
+    """Relays WebRTC signaling messages (offer, answer, candidate) to the peer."""
+    peer_id = pairings.get(sender_id)
+    if not peer_id:
+        logger.warning(f"Client {sender_id} tried to relay signaling message but has no peer.")
+        # Optionally send an error back to sender_id
+        # ws_sender = clients.get(sender_id, {}).get("ws")
+        # if ws_sender:
+        #     await send_json(ws_sender, {"type": "error", "message": "Cannot relay message: not paired"})
+        return
+
+    peer_data = clients.get(peer_id)
+    if not peer_data or not peer_data.get("ws"):
+        logger.warning(f"Cannot relay signaling message to peer {peer_id}: Peer not found or disconnected.")
+        return
+
+    peer_ws = peer_data["ws"]
+    msg_type = message_data.get("type")
+    logger.info(f"Relaying '{msg_type}' from {sender_id} to {peer_id}")
+
+    # Add a marker so client knows it's from the peer via the server
+    message_data["from_peer"] = True
+    await send_json(peer_ws, message_data)
+
 async def connection_handler(ws, path=None):
     """Handles a new WebSocket connection."""
     client_id = None
@@ -151,20 +176,25 @@ async def connection_handler(ws, path=None):
                 message_data = json.loads(raw_message)
                 msg_type = message_data.get("type")
                 logger.debug(f"Received from {client_id}: type={msg_type}, data={message_data}")
-
+                # Update last pong time (for Stage 5)
+                # if client_id in clients: clients[client_id]["last_pong"] = time.time()
                 if msg_type == "pair_request":
                     target_id = message_data.get("target_id")
                     if target_id:
                         await handle_pair_request(client_id, target_id)
                     else:
                         logger.warning(f"Received pair_request from {client_id} without target_id.")
-                elif msg_type == "message":
+                elif msg_type == "message": # Application-level message
                     target_id = message_data.get("to")
                     content = message_data.get("content")
                     if target_id and content:
                         await handle_message(client_id, target_id, content)
                     else:
                         logger.warning(f"Received message from {client_id} with missing to/content fields.")
+                elif msg_type in ["offer", "answer", "candidate"]: # WebRTC signaling
+                    await relay_signaling_message(client_id, message_data)
+                # elif msg_type == "pong": # For Stage 5
+                #     pass # Handled by updating last_pong above
                 else:
                     logger.warning(f"Received unhandled message type '{msg_type}' from {client_id}")
             except json.JSONDecodeError:

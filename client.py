@@ -5,9 +5,14 @@ import websockets
 import sys # Add sys import
 import argparse # Add argparse import
 from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
+from aiortc import RTCPeerConnection, RTCSessionDescription, RTCConfiguration, RTCIceServer
 
 # --- Configuration ---
 SERVER_URL = f"ws://localhost:8765" # Use the server host/port defined there
+STUN_SERVER = "stun:stun.l.google.com:19302"
+RTC_CONFIG = RTCConfiguration(
+    iceServers=[RTCIceServer(urls=[STUN_SERVER])]
+)
 
 # --- Logging Setup ---
 logging.basicConfig(
@@ -19,28 +24,95 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- Client State ---
-websocket = None
-my_id = None
-peer_id = None
-is_initiator = False
-listen_mode = False
+websocket: websockets.WebSocketClientProtocol | None = None
+my_id: str | None = None
+peer_id: str | None = None
+is_initiator: bool = False
+listen_mode: bool = False
+pc: RTCPeerConnection | None = None
+# data_channel will be added in Stage 4
 
 # --- Argument Parsing ---
 def parse_arguments():
     parser = argparse.ArgumentParser(description="WebSocket client with peer-to-peer functionality")
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--listen", action="store_true", help="Listen mode: print UUID and wait for connection")
-    group.add_argument("--connect-to", type=str, help="UUID to connect to")
+    group.add_argument("--connect-to", type=str, help="Peer's UUID to connect to")
     return parser.parse_args()
+
+# --- WebRTC Functions ---
+def create_peer_connection():
+    """Creates or resets the RTCPeerConnection object."""
+    global pc
+    if pc and pc.connectionState != "closed":
+        logger.warning("Closing existing PeerConnection before creating a new one.")
+        # Closing might need to be async if done elsewhere, but here it's prep
+        # If this causes issues, we might need to manage closure more carefully async
+        asyncio.create_task(pc.close()) # Fire and forget close, handle errors if needed
+
+    logger.info("Creating new RTCPeerConnection")
+
+    pc = RTCPeerConnection(configuration=RTC_CONFIG)
+
+    @pc.on("iceconnectionstatechange")
+    async def on_iceconnectionstatechange():
+        if pc: logger.info(f"ICE Connection State: {pc.iceConnectionState}")
+
+    @pc.on("connectionstatechange")
+    async def on_connectionstatechange():
+        if pc: logger.info(f"Peer Connection State: {pc.connectionState}")
+
+    # @pc.on("icecandidate") will be added in Stage 4
+    # @pc.on("datachannel") will be added in Stage 4
+
+async def start_webrtc(initiator_flag: bool):
+    """Starts the WebRTC handshake process."""
+    global pc
+    if not pc:
+        logger.error("RTCPeerConnection not initialized. Cannot start WebRTC.")
+        return
+
+    if initiator_flag:
+        logger.info("Starting WebRTC as initiator.")
+        # --- Data Channel Creation (Required for Offer) ---
+        # We create it here to make createOffer work, full handling in Stage 4
+        if not pc: # Add extra safety check
+             logger.error("PeerConnection not available for data channel creation.")
+             return
+        logger.info("Creating data channel 'chat' (needed for offer generation)...")
+        # Assign to a local var for now, global assignment/handlers in Stage 4
+        _channel = pc.createDataChannel("chat")
+        logger.info(f"Data channel '{_channel.label}' created locally.")
+        # setup_datachannel_handlers will be called in Stage 4
+        # ---------------------------------------------------
+
+        logger.info("Creating offer...")
+        try:
+            offer = await pc.createOffer()
+            await pc.setLocalDescription(offer)
+            logger.info("Offer created and set as local description.")
+            await send_ws_message({
+                "type": "offer",
+                "sdp": pc.localDescription.sdp
+            })
+            logger.info("Sent offer to signaling server.")
+        except Exception as e:
+            logger.error(f"Error creating/sending offer: {e}", exc_info=True)
+    else:
+        logger.info("Starting WebRTC as receiver. Waiting for offer...")
 
 # --- Core Logic ---
 async def handle_server_message(message):
     """Handles messages received from the signaling server."""
-    global my_id, peer_id, is_initiator
+    global my_id, peer_id, is_initiator, pc
     try:
         data = json.loads(message)
         msg_type = data.get("type")
-        logger.debug(f"Received message: {data}")
+        from_peer = data.get("from_peer", False) # Check if relayed by server
+
+        # Log differently based on origin
+        log_prefix = "[From Peer] " if from_peer else "[From Server] "
+        logger.debug(f"{log_prefix} Received message: {data}")
 
         if msg_type == "your_id":
             my_id = data.get("id")
@@ -60,6 +132,9 @@ async def handle_server_message(message):
                 role = "initiator" if is_initiator else "receiver"
                 logger.info(f"*** Paired with {peer_id}! You are the {role}. ***")
                 sys.stdout.flush()  # Explicitly flush stdout
+                # --- Start WebRTC ---
+                create_peer_connection()
+                await start_webrtc(is_initiator)
             else:
                 logger.error("Received 'paired' message but peer_id was missing.")
         elif msg_type == "message":
@@ -85,8 +160,69 @@ async def handle_server_message(message):
             error_msg = data.get("message", "Unknown error")
             logger.error(f"*** Server Error: {error_msg} ***")
             sys.stdout.flush()  # Explicitly flush stdout
+        # --- WebRTC Signaling Handlers ---
+        elif msg_type == "offer" and from_peer:
+            if not pc:
+                logger.error("Received offer but PeerConnection is not ready.")
+                return
+            if is_initiator:
+                 logger.warning("Received offer but I am the initiator. Ignoring.")
+                 return # Initiator should not receive offers in this basic setup
+
+            offer_sdp = data.get("sdp")
+            if not offer_sdp:
+                logger.error("Received offer message missing 'sdp'.")
+                return
+
+            logger.info("Received offer from peer. Processing...")
+            offer_desc = RTCSessionDescription(sdp=offer_sdp, type="offer")
+            try:
+                await pc.setRemoteDescription(offer_desc)
+                logger.info("Set remote description (offer). Creating answer...")
+                answer = await pc.createAnswer()
+                await pc.setLocalDescription(answer)
+                logger.info("Answer created and set as local description.")
+                await send_ws_message({
+                    "type": "answer",
+                    "sdp": pc.localDescription.sdp
+                })
+                logger.info("Sent answer to signaling server.")
+            except Exception as e:
+                logger.error(f"Error processing offer/creating answer: {e}", exc_info=True)
+
+        elif msg_type == "answer" and from_peer:
+            if not pc:
+                logger.error("Received answer but PeerConnection is not ready.")
+                return
+            if not is_initiator:
+                logger.warning("Received answer but I am not the initiator. Ignoring.")
+                return # Receiver should not receive answers
+
+            answer_sdp = data.get("sdp")
+            if not answer_sdp:
+                logger.error("Received answer message missing 'sdp'.")
+                return
+
+            logger.info("Received answer from peer. Setting remote description...")
+            answer_desc = RTCSessionDescription(sdp=answer_sdp, type="answer")
+            try:
+                await pc.setRemoteDescription(answer_desc)
+                logger.info("Set remote description (answer). SDP exchange complete.")
+                # ICE candidate exchange will start automatically via @pc.on('icecandidate') in Stage 4
+            except Exception as e:
+                logger.error(f"Error setting remote description (answer): {e}", exc_info=True)
+
+        elif msg_type == "candidate" and from_peer:
+            # Handle candidates in Stage 4
+            logger.debug("Received ICE candidate (handling deferred to Stage 4).")
+            pass
+
         else:
-            logger.warning(f"Received unhandled message type: {msg_type} | Data: {data}")
+            # Check if it's a known type but not from peer when expected
+            if msg_type in ["offer", "answer", "candidate"] and not from_peer:
+                logger.warning(f"Received signaling message '{msg_type}' directly from server? Discarding.")
+            else:
+                logger.warning(f"Received unhandled message type: {msg_type} | Data: {data}")
 
     except json.JSONDecodeError:
         logger.error(f"Failed to decode JSON message from server: {message[:200]}")
@@ -113,7 +249,7 @@ async def connect_to_peer(target_id):
     await send_ws_message({"type": "pair_request", "target_id": target_id})
 
 async def user_input_handler():
-    """Handles user input to send pair requests."""
+    """Handles user input for pairing or sending messages (currently server-relayed)."""
     global peer_id, listen_mode
     loop = asyncio.get_running_loop()
     
@@ -133,13 +269,15 @@ async def user_input_handler():
                 logger.debug(f"Sending pair request to: {target_id}")
                 await send_ws_message({"type": "pair_request", "target_id": target_id})
         else:
-            # Already paired - handle differently (message mode)
-            print("[message]> ", end="", flush=True)
+            # Paired. Check if WebRTC data channel is ready (Stage 4/5)
+            # For now, continue sending via server relay if paired.
+            # In Stage 5, this logic changes to use data_channel.send()
+            print("[server relay msg]> ", end="", flush=True)
             cmd = await loop.run_in_executor(None, sys.stdin.readline)
             message = cmd.strip()
             
             if message:
-                logger.info(f"Ready to send message to peer: {message}")
+                logger.info(f"Sending message via server relay: {message}")
                 # Send message with proper message type instead of pair_request
                 await send_ws_message({
                     "type": "message", 
@@ -162,7 +300,7 @@ async def listener_loop():
 # --- Main Execution ---
 async def main():
     """Connects to the server and listens for messages."""
-    global websocket, listen_mode
+    global websocket, listen_mode, pc
     args = parse_arguments()
     
     # Set listen mode based on arguments
@@ -209,6 +347,11 @@ async def main():
     finally:
         logger.info("Disconnecting...")
         # websocket is automatically closed by 'async with', setting to None is good practice
+        global pc
+        if pc and pc.connectionState != "closed":
+            logger.info("Closing RTCPeerConnection...")
+            await pc.close()
+            pc = None
         websocket = None
         logger.info("Client shut down.")
 
