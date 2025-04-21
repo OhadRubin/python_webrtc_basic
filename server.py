@@ -55,14 +55,24 @@ def unregister(client_id):
         ws = client_data.get("ws")
         peer_id = client_data.get("peer_id")
 
-        # Clean up pairing state (Stage 2 - Server side only)
-        if peer_id:
-            logger.info(f"Client {client_id} disconnected, removing server-side pairing with {peer_id}")
+        # Clean up pairing state
+        if peer_id and peer_id in clients:
+            logger.info(f"Client {client_id} disconnected, removing pairing with {peer_id}")
             # Remove from pairings dictionary
             pairings.pop(client_id, None)
             pairings.pop(peer_id, None)
-            # Crucially for Stage 2, we DO NOT notify the peer or clear their peer_id yet.
-            # That happens in Stage 5.
+            
+            # Notify the peer that their partner has disconnected
+            peer_data = clients.get(peer_id)
+            if peer_data and peer_data.get("ws"):
+                peer_ws = peer_data.get("ws")
+                # Update peer's state
+                peer_data["peer_id"] = None
+                asyncio.create_task(send_json(
+                    peer_ws,
+                    {"type": "peer_disconnected", "peer_id": client_id}
+                ))
+                logger.info(f"Notified peer {peer_id} about disconnection of {client_id}")
 
         logger.info(f"Client {client_id} disconnected ({ws.remote_address if ws else 'unknown address'}). Remaining clients: {len(clients)}")
     else:
@@ -98,6 +108,38 @@ async def handle_pair_request(client_id, target_id):
     await send_json(ws_requester, {"type": "paired", "peer_id": target_id, "initiator": True})
     await send_json(ws_target, {"type": "paired", "peer_id": client_id, "initiator": False})
 
+async def handle_message(client_id, target_id, content):
+    """Handles message forwarding between paired clients."""
+    # Get source client data
+    source_data = clients.get(client_id)
+    # Get target client data
+    target_data = clients.get(target_id)
+    
+    # Source websocket for error responses
+    ws_source = source_data["ws"]
+    
+    # Validation checks
+    if not target_data:
+        await send_json(ws_source, {"type": "error", "message": "Target client not found"})
+        return
+        
+    # Check if clients are paired with each other
+    if source_data.get("peer_id") != target_id or target_data.get("peer_id") != client_id:
+        await send_json(ws_source, {"type": "error", "message": "You are not paired with this client"})
+        return
+    
+    # Get target websocket
+    ws_target = target_data["ws"]
+    
+    # Forward the message to the target client
+    await send_json(ws_target, {
+        "type": "message",
+        "from": client_id,
+        "content": content
+    })
+    
+    logger.debug(f"Message forwarded from {client_id} to {target_id}")
+
 async def connection_handler(ws, path=None):
     """Handles a new WebSocket connection."""
     client_id = None
@@ -116,6 +158,13 @@ async def connection_handler(ws, path=None):
                         await handle_pair_request(client_id, target_id)
                     else:
                         logger.warning(f"Received pair_request from {client_id} without target_id.")
+                elif msg_type == "message":
+                    target_id = message_data.get("to")
+                    content = message_data.get("content")
+                    if target_id and content:
+                        await handle_message(client_id, target_id, content)
+                    else:
+                        logger.warning(f"Received message from {client_id} with missing to/content fields.")
                 else:
                     logger.warning(f"Received unhandled message type '{msg_type}' from {client_id}")
             except json.JSONDecodeError:

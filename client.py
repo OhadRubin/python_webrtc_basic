@@ -3,6 +3,7 @@ import json
 import logging
 import websockets
 import sys # Add sys import
+import argparse # Add argparse import
 from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
 
 # --- Configuration ---
@@ -22,6 +23,15 @@ websocket = None
 my_id = None
 peer_id = None
 is_initiator = False
+listen_mode = False
+
+# --- Argument Parsing ---
+def parse_arguments():
+    parser = argparse.ArgumentParser(description="WebSocket client with peer-to-peer functionality")
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--listen", action="store_true", help="Listen mode: print UUID and wait for connection")
+    group.add_argument("--connect-to", type=str, help="UUID to connect to")
+    return parser.parse_args()
 
 # --- Core Logic ---
 async def handle_server_message(message):
@@ -36,6 +46,8 @@ async def handle_server_message(message):
             my_id = data.get("id")
             if my_id:
                 logger.info(f"*** Your Client ID: {my_id} ***")
+                if listen_mode:
+                    logger.info("*** Waiting for connection... ***")
                 sys.stdout.flush()  # Explicitly flush stdout
             else:
                 logger.error("Received 'your_id' message but ID was missing.")
@@ -50,6 +62,25 @@ async def handle_server_message(message):
                 sys.stdout.flush()  # Explicitly flush stdout
             else:
                 logger.error("Received 'paired' message but peer_id was missing.")
+        elif msg_type == "message":
+            # Handle message from peer
+            sender_id = data.get("from")
+            content = data.get("content")
+            if sender_id and content:
+                logger.info(f"*** Message from {sender_id}: {content} ***")
+                sys.stdout.flush()  # Explicitly flush stdout
+            else:
+                logger.error("Received 'message' with missing fields.")
+        elif msg_type == "peer_disconnected":
+            disconnected_peer = data.get("peer_id")
+            if disconnected_peer and disconnected_peer == peer_id:
+                logger.info(f"*** Peer {peer_id} has disconnected. ***")
+                # Reset pairing state
+                peer_id = None
+                is_initiator = False
+                sys.stdout.flush()  # Explicitly flush stdout
+            else:
+                logger.warning(f"Received peer_disconnected for unknown peer: {disconnected_peer}")
         elif msg_type == "error":
             error_msg = data.get("message", "Unknown error")
             logger.error(f"*** Server Error: {error_msg} ***")
@@ -65,7 +96,7 @@ async def handle_server_message(message):
 async def send_ws_message(payload):
     """Sends a JSON message to the WebSocket server."""
     global websocket
-    if websocket and not websocket.closed:
+    if websocket:
         try:
             await websocket.send(json.dumps(payload))
             logger.debug(f"Sent message: {payload}")
@@ -76,10 +107,20 @@ async def send_ws_message(payload):
     else:
         logger.warning("WebSocket not connected, cannot send message.")
 
+async def connect_to_peer(target_id):
+    """Send pair request to connect to the specified peer ID."""
+    logger.info(f"Connecting to peer: {target_id}")
+    await send_ws_message({"type": "pair_request", "target_id": target_id})
+
 async def user_input_handler():
     """Handles user input to send pair requests."""
-    global peer_id
+    global peer_id, listen_mode
     loop = asyncio.get_running_loop()
+    
+    # In listen mode, we just wait for incoming connections
+    if listen_mode:
+        while peer_id is None:
+            await asyncio.sleep(1)
     
     while True:
         if peer_id is None:
@@ -92,8 +133,22 @@ async def user_input_handler():
                 logger.debug(f"Sending pair request to: {target_id}")
                 await send_ws_message({"type": "pair_request", "target_id": target_id})
         else:
-            # Already paired - wait for next stage implementation
-            await asyncio.sleep(1)
+            # Already paired - handle differently (message mode)
+            print("[message]> ", end="", flush=True)
+            cmd = await loop.run_in_executor(None, sys.stdin.readline)
+            message = cmd.strip()
+            
+            if message:
+                logger.info(f"Ready to send message to peer: {message}")
+                # Send message with proper message type instead of pair_request
+                await send_ws_message({
+                    "type": "message", 
+                    "to": peer_id, 
+                    "content": message
+                })
+            
+            # Sleep to prevent CPU spinning - longer sleep since we're just waiting
+            await asyncio.sleep(0.5)
 
 async def listener_loop():
     """Listens for messages from the server."""
@@ -107,7 +162,13 @@ async def listener_loop():
 # --- Main Execution ---
 async def main():
     """Connects to the server and listens for messages."""
-    global websocket
+    global websocket, listen_mode
+    args = parse_arguments()
+    
+    # Set listen mode based on arguments
+    listen_mode = args.listen
+    connect_target = args.connect_to
+    
     logger.info(f"Attempting to connect to server at {SERVER_URL}...")
     try:
         # The 'async with' ensures the connection is closed automatically on exit
@@ -122,20 +183,21 @@ async def main():
             websocket = ws
             logger.info("Connected to server.")
             
-            # Create tasks for listening to server messages and handling user input
+            # Create task for listening to server messages
             listener_task = asyncio.create_task(listener_loop())
-            input_task = asyncio.create_task(user_input_handler())
             
-            # Wait for either task to complete (e.g., on error or disconnect)
-            try:
+            # Automatically connect if --connect-to was specified
+            if connect_target:
+                # Wait a moment for the your_id message to be processed
+                await asyncio.sleep(0.5)
+                connect_task = asyncio.create_task(connect_to_peer(connect_target))
+                input_task = asyncio.create_task(user_input_handler())
+                await asyncio.gather(listener_task, connect_task, input_task)
+            else:
+                # Just start the regular input handler
+                input_task = asyncio.create_task(user_input_handler())
                 await asyncio.gather(listener_task, input_task)
-            except asyncio.CancelledError:
-                logger.info("Tasks cancelled.")
-            finally:
-                # Make sure to cancel both tasks when one exits
-                listener_task.cancel()
-                input_task.cancel()
-
+            
     except ConnectionClosedOK:
         logger.info("Server closed the connection cleanly.")
     except ConnectionClosedError as e:

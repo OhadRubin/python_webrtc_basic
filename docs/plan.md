@@ -91,7 +91,7 @@ We will break down the implementation of the WebRTC signaling server and client 
     8.  Try pairing Client A with `ID_B` again. Verify Client A prints a server error ("already paired").
     9.  Start Client C. Try pairing Client A with Client C's ID. Verify Client A prints a server error ("already paired").
     10. Try pairing Client C with a non-existent ID. Verify Client C prints a server error ("Target client not found").
-
+****
 ---
 
 **Stage 3: WebRTC SDP Offer/Answer Exchange via Signaling**
