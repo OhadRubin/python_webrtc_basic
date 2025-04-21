@@ -1,6 +1,23 @@
 
-Our goal is to implement a WebRTC signaling server and client for establishing peer-to-peer connections.
+Our goal is to implement a WebRTC signaling server and client for establishing peer-to-peer connections. 
 
+<instructions>
+
+Part 1 (in your thoughts only, do not output this in the final response):
+You goal here is to flesh out stage 5. think it through. do not implement it yet, just describe what you would do.
+
+Part 2 (in your thoughts only, do not output this in the final response):
+Describe in detail what is considered out-of-scope for stage 5.
+
+
+Part 3 (in your thoughts only, do not output this in the final response):
+Describe in detail what is considered "Going above and beyond" for stage 5, and what is considered "essential" for stage 5.
+
+
+Part 4 (in your thoughts only and in the final response):
+Give me a detailed plan for stage 5, incorporate only the essential functionality. 
+In this part we call the original "out-of-scope" as **extremely out-of-scope**, and the "Going above and beyond" as **out-of-scope**.
+</instructions>
 
 # Server App
 - does initial pairing
@@ -11,13 +28,13 @@ Our goal is to implement a WebRTC signaling server and client for establishing p
 - once connected to a different client, it can send messages to the other client via WebRTC.
 
 
-We will break down the implementation of the WebRTC signaling server and client into 5 testable steps.
-"Testable" means we can run the code after each step and verify specific functionality works before moving on.
+We will break down the implementation of the WebRTC signaling server and client into 5 testable stages.
+"Testable" means we can run the code after each stage and verify specific functionality works before moving on.
 
 
 ---
 
-**Step 1: Basic Server Connection and Client ID Assignment**
+**Stage 1: Basic Server Connection and Client ID Assignment**
 
 *   **Goal:** Verify the server can start, clients can connect via WebSocket, and each client receives a unique ID from the server. Test basic disconnect handling on the server.
 *   **Server Implementation (`server.py`):**
@@ -29,7 +46,6 @@ We will break down the implementation of the WebRTC signaling server and client 
     *   Implement `connection_handler` to call `register` on connection and `unregister` on disconnection (using `try/finally`). Handle basic `ConnectionClosed` exceptions.
     *   Implement `main` function to start the server (`websockets.serve`).
     *   Implement the main execution block (`if __name__ == "__main__":`).
-    *   **Crucially:** Remove the duplicated client code from line 165 onwards.
 *   **Client Implementation (`client.py`):**
     *   Implement imports (`asyncio`, `json`, `logging`, `websockets`).
     *   Implement logging setup, `SERVER_URL` constant.
@@ -55,7 +71,7 @@ We will break down the implementation of the WebRTC signaling server and client 
 
 ---
 
-**Step 2: Server-Side Pairing Logic and Client Pairing Request**
+**Stage 2: Server-Side Pairing Logic and Client Pairing Request**
 
 *   **Goal:** Implement the server logic to handle pairing requests between two clients. Clients should be able to request pairing and receive confirmation or errors.
 *   **Server Implementation (`server.py`):**
@@ -96,7 +112,7 @@ We will break down the implementation of the WebRTC signaling server and client 
 
 ---
 
-**Step 3: WebRTC SDP Offer/Answer Exchange via Signaling**
+**Stage 3: WebRTC SDP Offer/Answer Exchange via Signaling**
 
 *   **Goal:** Implement the signaling part of the WebRTC handshake. The initiating client sends an offer, the peer receives it, sends an answer, and the initiator receives it, all relayed through the server.
 *   **Server Implementation (`server.py`):**
@@ -137,7 +153,7 @@ We will break down the implementation of the WebRTC signaling server and client 
 
 ---
 
-**Step 4: WebRTC ICE Candidate Exchange and Data Channel Setup**
+**Stage 4: WebRTC ICE Candidate Exchange and Data Channel Setup**
 
 *   **Goal:** Implement the exchange of ICE candidates via the signaling server. Establish the actual peer-to-peer connection and set up the data channel.
 *   **Server Implementation (`server.py`):**
@@ -171,7 +187,7 @@ We will break down the implementation of the WebRTC signaling server and client 
 
 ---
 
-**Step 5: Data Channel Communication, Ping/Pong, and Disconnect Handling**
+**Stage 5: Data Channel Communication, Ping/Pong, and Disconnect Handling**
 
 *   **Goal:** Enable message sending over the established data channel. Implement server keepalives (ping/pong) and robust peer disconnection notification.
 *   **Server Implementation (`server.py`):**
