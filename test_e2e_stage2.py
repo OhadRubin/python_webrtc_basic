@@ -188,7 +188,7 @@ class TestE2EStage2(unittest.IsolatedAsyncioTestCase):
 
         # Check server logs for successful pairing
         await asyncio.sleep(0.1) # Allow logs to flush
-        log_content = self.log_stream.getvalue()
+        log_content = self.log_stream.getvalue() # Get fresh logs
         self.assertIn(f"Pairing successful: {id_a} <-> {id_b}", log_content)
         test_logger.info("Test: Verified server log for successful pairing.")
 
@@ -242,6 +242,47 @@ class TestE2EStage2(unittest.IsolatedAsyncioTestCase):
         # Ensure others didn't get messages
         await self._expect_no_message(ws_a, "Client A")
         await self._expect_no_message(ws_b, "Client B")
+
+
+    async def test_paired_client_disconnect_cleanup(self):
+        """Tests server cleanup when a paired client disconnects (Stage 2 logic)."""
+        ws_a, id_a = await self._connect_client("Client A")
+        ws_b, id_b = await self._connect_client("Client B")
+
+        # Pair A and B successfully first
+        test_logger.info(f"Test: Setting up - Pairing Client A ({id_a}) with Client B ({id_b})")
+        await self._send_message(ws_a, {"type": "pair_request", "target_id": id_b}, "Client A")
+        await self._receive_and_parse(ws_a, "Client A") # Consume A's 'paired' msg
+        await self._receive_and_parse(ws_b, "Client B") # Consume B's 'paired' msg
+        test_logger.info("Test: Setup complete - A and B are paired.")
+
+        # Disconnect Client A
+        test_logger.info(f"Test: Disconnecting Client A ({id_a})...")
+        await ws_a.close()
+        await asyncio.sleep(0.2) # Allow server time to process disconnect and run unregister
+
+        # Verify Server Logs for Disconnect and Pairing Cleanup (Server-Side only)
+        log_content = self.log_stream.getvalue()
+        self.assertIn(f"Client {id_a} disconnected", log_content)
+        # Crucially, check the log message confirming server-side pairing removal for Stage 2
+        self.assertIn(f"removing server-side pairing with {id_b}", log_content)
+        test_logger.info("Test: Verified server logs for disconnect and server-side pairing cleanup.")
+
+        # Verify Client B (the peer) did NOT receive any notification
+        test_logger.info("Test: Verifying Client B received no peer disconnect notification...")
+        await self._expect_no_message(ws_b, "Client B", duration=1.0) # Check for a longer duration
+        test_logger.info("Test: Confirmed Client B received no message.")
+
+        # Verify Server *still considers B paired* (Stage 2 behavior)
+        # Attempt to pair B with a new client C - it should fail as B's peer_id wasn't cleared server-side
+        ws_c, id_c = await self._connect_client("Client C")
+        test_logger.info(f"Test: Attempting to pair Client B ({id_b}) with Client C ({id_c}) - should fail.")
+        await self._send_message(ws_b, {"type": "pair_request", "target_id": id_c}, "Client B")
+        msg_b_err = await self._receive_and_parse(ws_b, "Client B")
+        self.assertEqual(msg_b_err.get("type"), "error")
+        self.assertIn("You are already paired", msg_b_err.get("message", ""))
+        test_logger.info("Test: Verified Client B still considered paired by the server.")
+        await self._expect_no_message(ws_c, "Client C") # Ensure C didn't get anything
 
 
 if __name__ == '__main__':

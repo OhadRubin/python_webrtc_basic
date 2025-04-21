@@ -135,7 +135,14 @@ async def connection_handler(ws, path=None):
 async def main(ready_queue=None, stop_event=None):
     """Starts the WebSocket server."""
     logger.info(f"Server starting on ws://{SERVER_HOST}:{SERVER_PORT}...")
-    server = await websockets.serve(connection_handler, SERVER_HOST, SERVER_PORT, ping_interval=None) # Disable automatic pings
+    # Explicitly disable ping_interval and set a large close_timeout to prevent premature disconnections
+    server = await websockets.serve(
+        connection_handler, 
+        SERVER_HOST, 
+        SERVER_PORT, 
+        ping_interval=None,
+        close_timeout=10
+    )
     logger.info(f"Server listening on ws://{SERVER_HOST}:{SERVER_PORT}")
     
     # Signal that the server is ready (used for testing)

@@ -166,3 +166,21 @@
 14. **Verify:** Client C logs `*** Server Error: Target client not found ***`.
 15. Stop Client B (Ctrl+C).
 16. **Verify:** Server logs Client B disconnecting and removing the pairing state associated with B. **Crucially, Client A should *not* receive any notification about B disconnecting in this stage.** Client A's `peer_id` variable remains `ID_B`. (This asymmetry is per the stage requirements).
+
+
+
+*   **Deliverable:**
+    *   Server can manage pairing state.
+    *   Clients can request pairing by entering the target ID.
+    *   Clients receive confirmation (`"paired"`) or error messages.
+*   **Test:**
+    1.  Run `server.py`.
+    2.  Run Client A. Note its ID (e.g., `ID_A`).
+    3.  Run Client B. Note its ID (e.g., `ID_B`).
+    4.  In Client A's terminal, enter `ID_B`.
+    5.  Verify Client A prints "*** Paired with ID_B! ... ***".
+    6.  Verify Client B prints "*** Paired with ID_A! ... ***".
+    7.  Verify the server logs the successful pairing.
+    8.  Try pairing Client A with `ID_B` again. Verify Client A prints a server error ("already paired").
+    9.  Start Client C. Try pairing Client A with Client C's ID. Verify Client A prints a server error ("already paired").
+    10. Try pairing Client C with a non-existent ID. Verify Client C prints a server error ("Target client not found").
