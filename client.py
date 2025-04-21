@@ -5,7 +5,7 @@ import websockets
 import sys # Add sys import
 import argparse # Add argparse import
 from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
-from aiortc import RTCPeerConnection, RTCSessionDescription, RTCConfiguration, RTCIceServer
+from aiortc import RTCPeerConnection, RTCSessionDescription, RTCConfiguration, RTCIceServer, RTCIceCandidate, RTCDataChannel
 
 # --- Configuration ---
 SERVER_URL = f"ws://localhost:8765" # Use the server host/port defined there
@@ -29,8 +29,8 @@ my_id: str | None = None
 peer_id: str | None = None
 is_initiator: bool = False
 listen_mode: bool = False
-pc: RTCPeerConnection | None = None
-# data_channel will be added in Stage 4
+pc: RTCPeerConnection | None = None # The main PeerConnection object
+data_channel: RTCDataChannel | None = None # The data channel for communication
 
 # --- Argument Parsing ---
 def parse_arguments():
@@ -41,6 +41,25 @@ def parse_arguments():
     return parser.parse_args()
 
 # --- WebRTC Functions ---
+def setup_datachannel_handlers(channel: RTCDataChannel):
+    """Sets up handlers for the data channel events."""
+    @channel.on("open")
+    def on_open():
+        logger.info(f"*** Data channel '{channel.label}' opened! Ready for messages. ***")
+        sys.stdout.flush() # Ensure message is seen
+
+    @channel.on("close")
+    def on_close():
+        logger.info(f"*** Data channel '{channel.label}' closed. ***")
+        sys.stdout.flush() # Ensure message is seen
+
+    @channel.on("message")
+    def on_message(message):
+        # For Stage 4, just log receipt. Stage 5 will display it.
+        logger.info(f"Data channel message received (length: {len(message)}).")
+        # Example for Stage 5: logger.info(f"< Peer: {message}")
+        sys.stdout.flush() # Ensure message is seen
+
 def create_peer_connection():
     """Creates or resets the RTCPeerConnection object."""
     global pc
@@ -60,10 +79,38 @@ def create_peer_connection():
 
     @pc.on("connectionstatechange")
     async def on_connectionstatechange():
-        if pc: logger.info(f"Peer Connection State: {pc.connectionState}")
+        if pc:
+            logger.info(f"Peer Connection State: {pc.connectionState}")
+            if pc.connectionState == "connected":
+                logger.info("!!! PEER CONNECTION ESTABLISHED !!!")
+            elif pc.connectionState in ["failed", "disconnected", "closed"]:
+                logger.warning(f"Peer connection entered state: {pc.connectionState}")
+            sys.stdout.flush()
 
-    # @pc.on("icecandidate") will be added in Stage 4
-    # @pc.on("datachannel") will be added in Stage 4
+    @pc.on("icecandidate")
+    async def on_icecandidate(candidate: RTCIceCandidate | None):
+        if candidate:
+            logger.debug(f"Local ICE candidate generated: {candidate.sdp[:30]}...")
+            payload = {
+                "type": "candidate",
+                "candidate": {
+                    "candidate": candidate.sdp,
+                    "sdpMid": candidate.sdpMid,
+                    "sdpMLineIndex": candidate.sdpMLineIndex,
+                },
+            }
+            # Ensure websocket is available before sending
+            if websocket and websocket.open:
+                await send_ws_message(payload)
+            else:
+                logger.warning("WebSocket not open, cannot send ICE candidate.")
+
+    @pc.on("datachannel")
+    def on_datachannel(channel: RTCDataChannel):
+        global data_channel
+        logger.info(f"Data channel '{channel.label}' received.")
+        data_channel = channel
+        setup_datachannel_handlers(data_channel) # Setup handlers for the received channel
 
 async def start_webrtc(initiator_flag: bool):
     """Starts the WebRTC handshake process."""
@@ -74,16 +121,15 @@ async def start_webrtc(initiator_flag: bool):
 
     if initiator_flag:
         logger.info("Starting WebRTC as initiator.")
-        # --- Data Channel Creation (Required for Offer) ---
-        # We create it here to make createOffer work, full handling in Stage 4
+        # --- Data Channel Creation (Stage 4) ---
         if not pc: # Add extra safety check
-             logger.error("PeerConnection not available for data channel creation.")
-             return
-        logger.info("Creating data channel 'chat' (needed for offer generation)...")
-        # Assign to a local var for now, global assignment/handlers in Stage 4
-        _channel = pc.createDataChannel("chat")
-        logger.info(f"Data channel '{_channel.label}' created locally.")
-        # setup_datachannel_handlers will be called in Stage 4
+            logger.error("PeerConnection not available for data channel creation.")
+            return
+        logger.info("Creating data channel 'chat'...")
+        global data_channel # Declare intent to modify global
+        data_channel = pc.createDataChannel("chat") # Create and assign globally
+        logger.info(f"Data channel '{data_channel.label}' created locally.")
+        setup_datachannel_handlers(data_channel) # Setup handlers for the created channel
         # ---------------------------------------------------
 
         logger.info("Creating offer...")
@@ -104,7 +150,7 @@ async def start_webrtc(initiator_flag: bool):
 # --- Core Logic ---
 async def handle_server_message(message):
     """Handles messages received from the signaling server."""
-    global my_id, peer_id, is_initiator, pc
+    global my_id, peer_id, is_initiator, pc, data_channel # Added data_channel
     try:
         data = json.loads(message)
         msg_type = data.get("type")
@@ -153,6 +199,8 @@ async def handle_server_message(message):
                 # Reset pairing state
                 peer_id = None
                 is_initiator = False
+                # Close PC in Stage 5 here if desired, for now just reset pairing
+                # data_channel = None # Reset in Stage 5
                 sys.stdout.flush()  # Explicitly flush stdout
             else:
                 logger.warning(f"Received peer_disconnected for unknown peer: {disconnected_peer}")
@@ -213,9 +261,37 @@ async def handle_server_message(message):
                 logger.error(f"Error setting remote description (answer): {e}", exc_info=True)
 
         elif msg_type == "candidate" and from_peer:
-            # Handle candidates in Stage 4
-            logger.debug("Received ICE candidate (handling deferred to Stage 4).")
-            pass
+            if not pc:
+                logger.error("Received candidate but PeerConnection is not ready.")
+                return
+
+            logger.debug("Received ICE candidate from peer.")
+            candidate_data = data.get("candidate")
+            if candidate_data and "candidate" in candidate_data:
+                # Check for potential None values before creating RTCIceCandidate
+                sdp = candidate_data.get("candidate")
+                sdp_mid = candidate_data.get("sdpMid")
+                sdp_mline_index = candidate_data.get("sdpMLineIndex")
+
+                if sdp is None: # sdp is essential
+                    logger.warning("Received ICE candidate message missing 'candidate' SDP string.")
+                    return
+
+                try:
+                    # Reconstruct RTCIceCandidate
+                    candidate = RTCIceCandidate(
+                        sdp=sdp,
+                        sdpMid=sdp_mid, # Pass None if missing, aiortc might handle it
+                        sdpMLineIndex=sdp_mline_index, # Pass None if missing
+                    )
+                    logger.debug(f"Adding received ICE candidate: {candidate.sdp[:30]}...")
+                    await pc.addIceCandidate(candidate)
+                    logger.debug("Successfully added received ICE candidate.")
+                except Exception as e:
+                    logger.error(f"Error adding received ICE candidate: {e}", exc_info=True)
+                    logger.error(f"Problematic candidate data: {candidate_data}")
+            else:
+                logger.warning("Received malformed candidate message (missing 'candidate' dictionary or 'candidate.candidate' field).")
 
         else:
             # Check if it's a known type but not from peer when expected
@@ -250,7 +326,7 @@ async def connect_to_peer(target_id):
 
 async def user_input_handler():
     """Handles user input for pairing or sending messages (currently server-relayed)."""
-    global peer_id, listen_mode
+    global peer_id, listen_mode, data_channel
     loop = asyncio.get_running_loop()
     
     # In listen mode, we just wait for incoming connections
@@ -269,10 +345,19 @@ async def user_input_handler():
                 logger.debug(f"Sending pair request to: {target_id}")
                 await send_ws_message({"type": "pair_request", "target_id": target_id})
         else:
-            # Paired. Check if WebRTC data channel is ready (Stage 4/5)
-            # For now, continue sending via server relay if paired.
+            # Paired. Check if WebRTC data channel is ready (Stage 4 check / Stage 5 send)
             # In Stage 5, this logic changes to use data_channel.send()
-            print("[server relay msg]> ", end="", flush=True)
+            if data_channel and data_channel.readyState == "open":
+                # Stage 5: Ready to send via data channel
+                print("[P2P msg]> ", end="", flush=True)
+            else:
+                # Stage 4/Waiting: Data channel not ready yet
+                print("[server relay msg]> ", end="", flush=True)
+
+            # Continue reading input regardless of channel state for now
+            # In Stage 5, sending logic will differ based on channel state
+
+            # print("[server relay msg]> ", end="", flush=True) # Old prompt
             cmd = await loop.run_in_executor(None, sys.stdin.readline)
             message = cmd.strip()
             
@@ -300,7 +385,7 @@ async def listener_loop():
 # --- Main Execution ---
 async def main():
     """Connects to the server and listens for messages."""
-    global websocket, listen_mode, pc
+    global websocket, listen_mode, pc, data_channel
     args = parse_arguments()
     
     # Set listen mode based on arguments
@@ -348,11 +433,13 @@ async def main():
         logger.info("Disconnecting...")
         # websocket is automatically closed by 'async with', setting to None is good practice
         global pc
+        # Close RTCPeerConnection if it exists
         if pc and pc.connectionState != "closed":
             logger.info("Closing RTCPeerConnection...")
             await pc.close()
             pc = None
-        websocket = None
+        websocket = None # Connection closed by context manager
+        data_channel = None # Reset data channel reference
         logger.info("Client shut down.")
 
 if __name__ == "__main__":
