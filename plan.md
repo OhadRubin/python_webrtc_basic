@@ -1,23 +1,7 @@
 
 Our goal is to implement a WebRTC signaling server and client for establishing peer-to-peer connections. 
 
-<instructions>
-
-Part 1 (in your thoughts only, do not output this in the final response):
-You goal here is to flesh out stage 5. think it through. do not implement it yet, just describe what you would do.
-
-Part 2 (in your thoughts only, do not output this in the final response):
-Describe in detail what is considered out-of-scope for stage 5.
-
-
-Part 3 (in your thoughts only, do not output this in the final response):
-Describe in detail what is considered "Going above and beyond" for stage 5, and what is considered "essential" for stage 5.
-
-
-Part 4 (in your thoughts only and in the final response):
-Give me a detailed plan for stage 5, incorporate only the essential functionality. 
-In this part we call the original "out-of-scope" as **extremely out-of-scope**, and the "Going above and beyond" as **out-of-scope**.
-</instructions>
+We will break down the implementation of the WebRTC signaling server and client into 5 testable stages.
 
 # Server App
 - does initial pairing
@@ -27,8 +11,6 @@ In this part we call the original "out-of-scope" as **extremely out-of-scope**, 
 - either generates an api key, or connects to a different client via an api key.
 - once connected to a different client, it can send messages to the other client via WebRTC.
 
-
-We will break down the implementation of the WebRTC signaling server and client into 5 testable stages.
 "Testable" means we can run the code after each stage and verify specific functionality works before moving on.
 
 
