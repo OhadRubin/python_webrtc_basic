@@ -16,7 +16,7 @@ We will break down the implementation of the WebRTC signaling server and client 
 
 ---
 
-**Stage 1: Basic Server Connection and Client ID Assignment**
+**Stage 1: Basic Server Connection and Client ID Assignment** (DONE!)
 
 *   **Goal:** Verify the server can start, clients can connect via WebSocket, and each client receives a unique ID from the server. Test basic disconnect handling on the server.
 *   **Server Implementation (`server.py`):**
